@@ -20,10 +20,10 @@ Examples of use
 ---------------
 
 Create a default 'ovs0' bridge:
-ec create-vswitch 10.0.0.254/24
+<br/>ec create-vswitch 10.0.0.254/24
 
-Start a container in slot 1, with IP 10.0.0.1 and MAC 52:00:0a:00:00:01
-ec --slot=1 start <containername> <container parameters>
+Start a container in slot 1, with IP 10.0.0.1 and MAC 52:00:0a:00:00:01 :
+<br/>ec --slot=1 start <containername> <container parameters>
 
 Attach to a running container in slot 1:
-ec attach 1
+<br/>ec attach 1
