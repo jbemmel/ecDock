@@ -14,4 +14,16 @@ using a regularly structured allocation scheme. Regular structures reduce comple
 system easier to understand and manage.
 
 ecDock introduces the concept of 'slots': Each container is assigned to a slot ( #1, #2, ... ), and a slot has a
-fixed MAC address ( 0x52:xxxx:01, 0x52:xxxx:02, etc. )
+fixed MAC address ( 0x52:xxxx:01, 0x52:xxxx:02, etc. ). Likewise, each slot has a fixed IP address ( xxxx.1, xxxx.2, etc. )
+
+Examples of use
+---------------
+
+Create a default 'ovs0' bridge:
+ec create-vswitch 10.0.0.254/24
+
+Start a container in slot 1, with IP 10.0.0.1 and MAC 52:00:0a:00:00:01
+ec --slot=1 start <containername> <container parameters>
+
+Attach to a running container in slot 1:
+ec attach 1
