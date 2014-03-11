@@ -68,13 +68,13 @@ function install() {
 # Allow override of default parameters
 if ! [ -e /etc/default/ecp ]; then
 cat > /etc/default/ecp << EOF
-# Default settings for the Elastic Cloud Platform (ECP)
-# Copyright(C) 2014 Alcatel-Lucent, all rights reserved
+# Default settings for the Elastic Cloud script
+# Copyright(C) 2014, all rights reserved
 
 # The name of the default vswitch to operate on
 DEFAULT_VSWITCH=${DEFAULT_VSWITCH}
 
-# The default slot to use when not specified with "-s" or "--slot="
+# The default slot to use when not specified with "--slot="
 DEFAULT_SLOT=${DEFAULT_SLOT} 
 
 # Default repository for getting ECP images
@@ -83,7 +83,7 @@ DEFAULT_REPOSITORY=$DEFAULT_REPOSITORY
 EOF
 fi
 
-log_fatal "TODO: install docker and openvswitch"
+log_fatal "TODO: install lxcdocker and openvswitch"
 }
 
 #
