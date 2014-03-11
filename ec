@@ -3,9 +3,9 @@
 # Command line script for adding OpenVSwitch networking to Docker containers
 # Copyright(C) 2014, all rights reserved
 # Author: Jeroen van Bemmel <jvb127@gmail.com>
-# Version: 1.0
+# Version: 1.1
 
-VERSION="1.0"
+VERSION="1.1"
 
 # Exit upon errors
 set -e
@@ -66,7 +66,7 @@ log_info "Docker and OpenVSwitch dependencies OK"
 function install() {
 
 # Allow override of default parameters
-if ![ -e /etc/default/ecp ]; then
+if ! [ -e /etc/default/ecp ]; then
 cat > /etc/default/ecp << EOF
 # Default settings for the Elastic Cloud Platform (ECP)
 # Copyright(C) 2014 Alcatel-Lucent, all rights reserved
@@ -102,8 +102,15 @@ function create_vswitch() {
   log_fatal "create-vswitch: Please provide a name ($VSWITCH, default $DEFAULT_VSWITCH), IP address ($IP) and optional physical device to connect to ($DEV)"
  fi
  
+ if [ "$USERMODE" == "1" ]; then
+  DP_TYPE="datapath_type=netdev"
+ else
+  modprobe openvswitch
+ fi
+
  check_dependencies
- $OVS_VSCTL add-br ${VSWITCH} -- set bridge ${VSWITCH} datapath_type=netdev other-config:hwaddr=${MAC}
+
+ $OVS_VSCTL add-br ${VSWITCH} -- set bridge ${VSWITCH} ${DP_TYPE} other-config:hwaddr=${MAC}
 # TODO set port to last octet of IP address
  if [ "$DEV" != "" ]; then
    log_info "Adding device $DEV as port with ID '0xfeed'..."
@@ -113,6 +120,21 @@ function create_vswitch() {
  
  log_info "New vswitch '$VSWITCH' created with IP $IP and MAC $MAC"
  exit 0
+}
+
+#
+# Derives IP and MAC parameters for a given SLOT and VSWITCH
+#
+function getSlotNetworkConfig() {
+  GWIPMASK=`ip a show ${VSWITCH} | awk '/inet / { print $2 }'`
+  IFS='/' read -ra IPMASK <<< "$GWIPMASK"
+  
+  GWIP=${IPMASK[0]}
+  MASK=${IPMASK[1]}
+  IPBASE=`echo $GWIP | cut -d "." -f1-3`
+  
+  IP="${IPBASE}.${SLOT}/${MASK}"
+  MAC=`echo "${IPBASE}.${SLOT}" | awk -F. '{printf("52:00:%02x:%02x:%02x:%02x",$1,$2,$3,$4)}'`
 }
 
 #
@@ -140,11 +162,20 @@ function start() {
   HOST="`hostname`-${SLOTNAME}"
  
   # Try to create OVS port first, to catch any errors without creating the container
-  $OVS_VSCTL add-port ${VSWITCH} ${SLOTNAME} -- set Interface ${SLOTNAME} type=internal ofport_request=${SLOT} 
+  if [ "$INTERNAL" == "1" ]; then
+   $OVS_VSCTL add-port ${VSWITCH} ${SLOTNAME} -- set Interface ${SLOTNAME} type=internal ofport_request=${SLOT}
+  else
+   ip link add c-${SLOTNAME} type veth peer name ${SLOTNAME}
+   $OVS_VSCTL add-port ${VSWITCH} ${SLOTNAME} -- set Interface ${SLOTNAME} ofport_request=${SLOT}
+  fi 
+
+  # TODO create ports for eth1..eth3 if defined
  
   # Start interactive shell without standard docker networking
   # Use -privileged to allow some more flexibility
   # Can use --lxc-conf="lxc.network.script.up = $SELF ${VSWITCH} ${SLOT}"
+  # Can use --lxc-conf="lxc.cgroup.cpuset.cpus = $SLOT" to pin container to CPU
+  # For multi-threaded containers, may need multiple CPUs
   # but then container isn't running yet in callback, and so we cannot find its NSPID yet
   CID=`docker run -d -privileged -n=false --name="${SLOTNAME}" -h ${HOST} -t -i ${IMAGE} $*`
   log_info "New container started in slot $SLOTNAME with ID=$CID"
@@ -160,20 +191,21 @@ function start() {
   mkdir -p /var/run/netns
   rm -f /var/run/netns/$NSPID
   ln -s /proc/$NSPID/ns/net /var/run/netns/$NSPID
-  
-  # Set OVS port up after launching the container
-  $OVS_OFCTL mod-port ${VSWITCH} ${SLOTNAME} up
-  
-  # Associate OVS port with the container's network namespace
-  ip link set $SLOTNAME netns $NSPID || (log_warn "ip link command failed; docker logs:" && docker logs ${SLOTNAME})
-  
+
+  if [ "$INTERNAL" == "1" ]; then
+   # Associate OVS port with the container's network namespace
+   ip link set $SLOTNAME netns $NSPID || (log_warn "ip link command failed (INTERNAL); docker logs:" && docker logs ${SLOTNAME})
+   ip netns exec $NSPID ip link set $SLOTNAME name eth0
+   $OVS_OFCTL mod-port ${VSWITCH} ${SLOTNAME} up
+  else
+   ip link set c-${SLOTNAME} netns $NSPID || (log_warn "ip link command failed; docker logs:" && docker logs ${SLOTNAME})
+   ip netns exec $NSPID ip link set c-$SLOTNAME name eth0
+   ip link set dev ${SLOTNAME} up
+  fi
+    
   # For now hardcoded /24
-  IPBASE=$(ifconfig ${VSWITCH} | grep "inet addr" | awk -F: '{print $2}' | awk '{print $1}' | sed /127.0.0.1/d | cut -d "." -f1-3)
-  IP="${IPBASE}.${SLOT}/24"
-  GWIP="${IPBASE}.254"
-  MAC=`echo "$IPBASE.$SLOT" | awk -F. '{printf("52:00:%02x:%02x:%02x:%02x",$1,$2,$3,$4)}'`
+  getSlotNetworkConfig
   
-  ip netns exec $NSPID ip link set $SLOTNAME name eth0
   ip netns exec $NSPID ifconfig eth0 hw ether $MAC
  
   # Use explicit forwarding for the port, instead of the 'normal' action.
@@ -243,7 +275,9 @@ function stop() {
    log_info "Removing container ${SLOTNAME}..."
    docker rm ${SLOTNAME}
  fi
- log_info "Removing OVS port ${SLOTNAME} from VSWITCH ${VSWITCH}..." 
+ log_info "Removing OVS port ${SLOTNAME} from VSWITCH ${VSWITCH}..."
+ getSlotNetworkConfig
+ $OVS_OFCTL del-flows ${VSWITCH} "dl_dst=${MAC}"
  $OVS_VSCTL del-port ${VSWITCH} ${SLOTNAME}
  OUTNAME=`printf "$VSWITCH-o%02d" $SLOT`
  $OVS_VSCTL --if-exists del-port ${VSWITCH} ${OUTNAME}
@@ -335,30 +369,45 @@ stop <slot>                 : Stop the container running in the given slot
 restart <slot> <image> <ps> : Restart the container running in the given slot
 cleanup                     : Cleanup containers that have exited
 
-create-vswitch <name> <IP subnet/mask> <device> : Create a new vswitch connected to the given device
-get-test-images             : Download test images from the private repository at $DEFAULT_REPOSITORY
+create-vswitch <name> <IP subnet/mask> [device] : Create a new vswitch connected to the given device (optional)
+get-test-images             : Download test images from the ECP repository
 
 The following options can be provided:
--i or --install              : Install Docker and OpenVSwitch packages ( Ubuntu only for now )
--q or --quiet                : Suppress log output
--s<num> or --slot=<num>      : Use the given slot ( automatically selected if not provided )
--v<name> or --vswitch=<name> : Operate on the given vswitch ( default "$DEFAULT_VSWITCH" )
+--install        : Install Docker and OpenVSwitch packages ( Ubuntu only for now )
+-q or --quiet    : Suppress log output
+--slot=<num>     : Use the given slot ( automatically selected if not provided )
+--vswitch=<name> : Operate on the given vswitch ( default "$DEFAULT_VSWITCH" )
+
+create-vswitch:
+--usermode       : Setup OpenVSwitch in usermode
 
 start:
--2 or --dual-nic             : Create 2 NICs eth0(in) & eth1(out) instead of a single NIC eth0 (in/out)
+--internal         : Use 'internal' ports instead of a veth interface
+--dual-nic         : Create 2 NICs eth0(in) & eth1(out) instead of a single NIC eth0 (in/out)
+--eth[0..3]=<name> : Connect the given network interface to the given vswitch
 
 stop:
--k or --no-rm                : Do not remove the container after stopping it
+--no-rm : Do not remove the container after stopping it
 
 END
 
 exit 0
 }
 
+# Example input and output (from the bash prompt):
+# ./parse.bash -a par1 'another arg' --c-long 'wow!*\?' -cmore -b " very long "
+# Option a
+# Option c, no argument
+# Option c, argument `more'
+# Remaining arguments:
+# --> `par1'
+# --> `another arg'
+# --> `wow!*\?'
+
 # Note that we use `"$@"' to let each command-line parameter expand to a 
 # separate word. The quotes around `$@' are essential!
 # We need TEMP as the `eval set --' would nuke the return value of getopt.
-TEMP=`getopt -o iqk2hs:v:: --long install,quiet,no-rm,dual-nic,help,slot:,vswitch:: \
+TEMP=`getopt -o hq --long install,quiet,no-rm,internal,usermode,dual-nic,help,slot:,vswitch:,eth0:,eth1:,eth2:,eth3: \
      -n 'ec' -- "$@"`
 
 if [ $? != 0 ] ; then log_fatal "Unable to parse options, exiting..." ; fi
@@ -368,7 +417,7 @@ eval set -- "$TEMP"
 
 DEFAULT_VSWITCH="ovs0"
 DEFAULT_SLOT=""
-DEFAULT_REPOSITORY="1.2.3.4:5000/ecp"
+DEFAULT_REPOSITORY="135.121.109.89:5000/ecp"
 
 # Allow override of default parameters
 if [ -e /etc/default/ecp ]; then
@@ -378,18 +427,27 @@ fi
 VSWITCH=$DEFAULT_VSWITCH
 SLOT=$DEFAULT_SLOT
 
+# Default: Single NIC connected to default vSwitch
+ETH[0]=$VSWITCH
+
 # Process [options]
 while true ; do
     case "$1" in
-    -2|--dual-nic) DUAL_NIC=1; shift ;;
-    --) shift ; break ;;
+        --dual-nic) DUAL_NIC=1; shift ;;
+        --) shift ; break ;;
 		
 	-h|--help) usage;;
-	-k|--no-rm) NO_RM=1; shift ;;
-	-v|--vswitch) VSWITCH="$2"; shift 2 ;;
-	-s|--slot) SLOT="$2"; shift 2 ;;
+	--no-rm) NO_RM=1; shift ;;
+	--vswitch) VSWITCH="$2"; shift 2 ;;
+	--usermode) USERMODE="1"; shift ;;
+	--internal) INTERNAL="1"; shift ;;
+	--slot) if [ $2 -lt 1 ] || [ $2 -gt 127 ] ; then log_fatal "Slot must be between 1 and 127, inclusive"; fi; SLOT="$2"; shift 2 ;;
 	-q|--quiet) QUIET=1; shift ;;
-	-i|--install) install ;;
+	--install) install ;;
+	--eth0) ETH[0]="$2"; shift 2 ;;
+	--eth1) ETH[1]="$2"; shift 2 ;;
+	--eth2) ETH[2]="$2"; shift 2 ;;
+	--eth3) ETH[3]="$2"; shift 2 ;;
     *) log_fatal "Internal error!" ;;
     esac
 done
