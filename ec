@@ -177,14 +177,10 @@ function start() {
   # Can use --lxc-conf="lxc.cgroup.cpuset.cpus = $SLOT" to pin container to CPU
   # For multi-threaded containers, may need multiple CPUs
   # but then container isn't running yet in callback, and so we cannot find its NSPID yet
-  CID=`docker run -d -privileged -n=false --name="${SLOTNAME}" -h ${HOST} -t -i ${IMAGE} $*`
+  CID=`docker run -d --privileged=true --networking=false --name="${SLOTNAME}" -h ${HOST} -t -i ${IMAGE} $*`
   log_info "New container started in slot $SLOTNAME with ID=$CID"
-  CGROUPMNT=$(awk '/group.*devices/ { print $2 }' /proc/mounts)
-  BASEPATH=$(find "$CGROUPMNT" -name "$CID*" | head -n 1)
-  if [ "$BASEPATH" == "" ]; then
-   log_fatal "Container not found - error during startup? Missing parameters?"
-  fi
-  NSPID=$(head -n 1 $BASEPATH/tasks)
+
+  NSPID=$( docker inspect --format='{{ .State.Pid }}' $CID )
   log_info "Found NSPID=$NSPID for container in slot $SLOTNAME"
 
   # Prepare working directory  
@@ -203,7 +199,7 @@ function start() {
    ip link set dev ${SLOTNAME} up
   fi
     
-  # For now hardcoded /24
+  # Get $MAC and $IP
   getSlotNetworkConfig
   
   ip netns exec $NSPID ifconfig eth0 hw ether $MAC
