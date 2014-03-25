@@ -5,7 +5,7 @@
 # Author: Jeroen van Bemmel <jvb127@gmail.com>
 # Version: 1.1
 
-VERSION="1.1"
+VERSION="1.2"
 
 # Exit upon errors
 set -e
@@ -30,7 +30,7 @@ log_fatal() {
 #
 function check_dependencies() {
 # Check that docker is running
-if [ "`pidof -nx docker`" == "" ]; then
+if [ "`pidof docker`" == "" ]; then
   log_fatal "Error: 'docker' is not running, please correct this and try again"
 fi
 
@@ -66,24 +66,23 @@ log_info "Docker and OpenVSwitch dependencies OK"
 function install() {
 
 # Allow override of default parameters
-if ! [ -e /etc/default/ecp ]; then
-cat > /etc/default/ecp << EOF
-# Default settings for the Elastic Cloud script
-# Copyright(C) 2014, all rights reserved
+if ! [ -e /etc/default/ecDock ]; then
+cat > /etc/default/ecDock << EOF
+# Default settings for ecDock
 
 # The name of the default vswitch to operate on
 DEFAULT_VSWITCH=${DEFAULT_VSWITCH}
 
-# The default slot to use when not specified with "--slot="
+# The default slot to use when not specified with "-s" or "--slot="
 DEFAULT_SLOT=${DEFAULT_SLOT} 
 
-# Default repository for getting ECP images
-DEFAULT_REPOSITORY=$DEFAULT_REPOSITORY
+# Default IPV6 prefix
+DEFAULT_IPV6_PREFIX=${DEFAULT_IPV6_PREFIX}
 
 EOF
 fi
 
-log_fatal "TODO: install lxcdocker and openvswitch"
+log_fatal "TODO: install docker and openvswitch"
 }
 
 #
@@ -117,6 +116,7 @@ function create_vswitch() {
    $OVS_VSCTL add-port ${VSWITCH} ${DEV} -- set interface ${DEV} ofport_request=65261
  fi
  ifconfig ${VSWITCH} ${IP}
+ ifconfig ${VSWITCH} inet6 add ${IPV6_PREFIX}::${IP}/64
  
  log_info "New vswitch '$VSWITCH' created with IP $IP and MAC $MAC"
  exit 0
@@ -134,6 +134,7 @@ function getSlotNetworkConfig() {
   IPBASE=`echo $GWIP | cut -d "." -f1-3`
   
   IP="${IPBASE}.${SLOT}/${MASK}"
+  # MAC base prefix hardcoded to "52:00"
   MAC=`echo "${IPBASE}.${SLOT}" | awk -F. '{printf("52:00:%02x:%02x:%02x:%02x",$1,$2,$3,$4)}'`
 }
 
@@ -180,7 +181,8 @@ function start() {
   CID=`docker run -d --privileged=true --networking=false --name="${SLOTNAME}" -h ${HOST} -t -i ${IMAGE} $*`
   log_info "New container started in slot $SLOTNAME with ID=$CID"
 
-  NSPID=$( docker inspect --format='{{ .State.Pid }}' $CID )
+  # Use docker inspect instead of looking in Linux FS
+  NSPID=`docker inspect --format='{{ .State.Pid }}' $CID`
   log_info "Found NSPID=$NSPID for container in slot $SLOTNAME"
 
   # Prepare working directory  
@@ -199,7 +201,6 @@ function start() {
    ip link set dev ${SLOTNAME} up
   fi
     
-  # Get $MAC and $IP
   getSlotNetworkConfig
   
   ip netns exec $NSPID ifconfig eth0 hw ether $MAC
@@ -233,13 +234,16 @@ function start() {
     ip netns exec $NSPID brctl addbr br0
     ip netns exec $NSPID brctl addif br0 eth0
     ip netns exec $NSPID brctl addif br0 eth1
-    ip netns exec $NSPID ifconfig br0 $IP
-
     ip netns exec $NSPID ip link set eth1 up
+    DEV="br0"
   else
-    ip netns exec $NSPID ifconfig eth0 $IP
+    DEV="eth0"
   fi
-  # TODO make gateway optional
+  
+  ip netns exec $NSPID ifconfig $DEV $IP
+  ip netns exec $NSPID ifconfig $DEV inet6 add $IPV6_PREFIX::$IP/64
+  
+  # Make gateway point to host 
   ip netns exec $NSPID ip route add default via $GWIP 
  
   # Set the eth0 link up last, so container can synchronize by waiting on this event
@@ -277,7 +281,10 @@ function stop() {
  $OVS_VSCTL del-port ${VSWITCH} ${SLOTNAME}
  OUTNAME=`printf "$VSWITCH-o%02d" $SLOT`
  $OVS_VSCTL --if-exists del-port ${VSWITCH} ${OUTNAME}
- 
+
+ # Try to remove companion veth port? not needed, del-port above removes it
+ # ip link del c-${SLOTNAME} || true
+
  exit 0
 }
 
@@ -335,17 +342,6 @@ function cleanup() {
   for c in `docker ps -a | awk '/Ghost/ { print $1 }'`; do docker stop $c || true; done
   for c in `docker ps -a | awk '/Exit/ { print $1 }'`; do docker rm $c || true; done
   
-  exit 0
-}
-
-#
-#
-#
-function get_test_images() {
-  log_info "Getting test images from $DEFAULT_REPOSITORY..."
-  check_dependencies
-  docker pull $DEFAULT_REPOSITORY
-  docker images
   exit 0
 }
 
@@ -413,15 +409,16 @@ eval set -- "$TEMP"
 
 DEFAULT_VSWITCH="ovs0"
 DEFAULT_SLOT=""
-DEFAULT_REPOSITORY="135.121.109.89:5000/ecp"
+DEFAULT_IPV6_PREFIX="2001:db8"
 
 # Allow override of default parameters
-if [ -e /etc/default/ecp ]; then
- . /etc/default/ecp
+if [ -e /etc/default/ecDock ]; then
+ . /etc/default/ecDock
 fi
 
 VSWITCH=$DEFAULT_VSWITCH
 SLOT=$DEFAULT_SLOT
+IPV6_PREFIX=$DEFAULT_IPV6_PREFIX
 
 # Default: Single NIC connected to default vSwitch
 ETH[0]=$VSWITCH
@@ -456,7 +453,6 @@ for arg do case "$arg" in
   restart) shift; restart $*;;
   cleanup) shift; cleanup;;
   create-vswitch) shift; create_vswitch $*;;
-  get-test-images) shift; get_test_images;;
   *) log_warn "Unknown command \"$arg\""; usage ;;
   esac
 done
