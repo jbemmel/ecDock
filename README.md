@@ -30,6 +30,11 @@ Dependencies
 + A Linux 3.8 kernel (or higher) with support for network namespaces
 + Docker package
 
+Installation ( NEW )
+--------------------
++ Install Ubuntu and Docker following the instructions on http://docker.io
++ Run 'docker run -it ecdock/install'
+
 Examples of use
 ---------------
 Create a default 'ovs0' bridge:
