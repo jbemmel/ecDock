@@ -1,14 +1,19 @@
 #!/bin/bash
 
 # Command line script for adding OpenVSwitch networking to Docker containers
-# Copyright(C) 2014, all rights reserved
+# Copyright(C) 2014-2020, all rights reserved
 # Author: Jeroen van Bemmel <jvb127@gmail.com>
-# Version: 1.1
+# Version: 1.2
+
+#
+# 2020-11-25 Fixed some issues on CentOS7
+#
 
 VERSION="1.2"
 
 # Exit upon errors
 set -e
+# set -x # debug
 
 log_info() {
 	if [ "$QUIET" == "" ]; then
@@ -30,7 +35,7 @@ log_fatal() {
 #
 function check_dependencies() {
 # Check that docker is running
-if [ "`pidof docker`" == "" ]; then
+if [ "`pidof dockerd`" == "" ]; then
   log_fatal "Error: 'docker' is not running, please correct this and try again"
 fi
 
@@ -116,7 +121,7 @@ function create_vswitch() {
    $OVS_VSCTL add-port ${VSWITCH} ${DEV} -- set interface ${DEV} ofport_request=65261
  fi
  ifconfig ${VSWITCH} ${IP}
- ifconfig ${VSWITCH} inet6 add ${IPV6_PREFIX}::${IP}/64
+ ifconfig ${VSWITCH} inet6 add ${IPV6_PREFIX}::${IP4}/64 || true
  
  log_info "New vswitch '$VSWITCH' created with IP $IP and MAC $MAC"
  exit 0
@@ -133,7 +138,8 @@ function getSlotNetworkConfig() {
   MASK=${IPMASK[1]}
   IPBASE=`echo $GWIP | cut -d "." -f1-3`
   
-  IP="${IPBASE}.${SLOT}/${MASK}"
+  IP4="${IPBASE}.${SLOT}"
+  IP="${IP4}/${MASK}"
   # MAC base prefix hardcoded to "52:00"
   MAC=`echo "${IPBASE}.${SLOT}" | awk -F. '{printf("52:00:%02x:%02x:%02x:%02x",$1,$2,$3,$4)}'`
 }
@@ -178,7 +184,7 @@ function start() {
   # Can use --lxc-conf="lxc.cgroup.cpuset.cpus = $SLOT" to pin container to CPU
   # For multi-threaded containers, may need multiple CPUs
   # but then container isn't running yet in callback, and so we cannot find its NSPID yet
-  CID=`docker run -d --privileged=true --networking=false --name="${SLOTNAME}" -h ${HOST} -t -i ${IMAGE} $*`
+  CID=`docker run -d --sysctl net.ipv6.conf.all.disable_ipv6=0 --privileged --network=none --name="${SLOTNAME}" -h ${HOST} -t -i ${IMAGE} $*`
   log_info "New container started in slot $SLOTNAME with ID=$CID"
 
   # Use docker inspect instead of looking in Linux FS
@@ -241,7 +247,7 @@ function start() {
   fi
   
   ip netns exec $NSPID ifconfig $DEV $IP
-  ip netns exec $NSPID ifconfig $DEV inet6 add $IPV6_PREFIX::$IP/64
+  ip netns exec $NSPID ifconfig $DEV inet6 add $IPV6_PREFIX::${IP4}/64 || true
   
   # Make gateway point to host 
   ip netns exec $NSPID ip route add default via $GWIP 
@@ -270,10 +276,10 @@ function stop() {
  check_dependencies
  SLOTNAME=`printf "$VSWITCH-s%02d" $SLOT`
  log_info "Stopping container ${SLOTNAME}..."
- docker stop ${SLOTNAME}
+ docker stop ${SLOTNAME} || true
  if [ "$NO_RM" == "" ]; then
    log_info "Removing container ${SLOTNAME}..."
-   docker rm ${SLOTNAME}
+   docker rm ${SLOTNAME} || true
  fi
  log_info "Removing OVS port ${SLOTNAME} from VSWITCH ${VSWITCH}..."
  getSlotNetworkConfig
